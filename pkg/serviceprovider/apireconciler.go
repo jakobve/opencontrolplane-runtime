@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -390,14 +391,50 @@ func (r *APIReconciler[T, C]) clusters(ctx context.Context, req ctrl.Request, ad
 	return clusterContext, res, nil
 }
 
+type controllerConfig struct {
+	forPredicates builder.Predicates
+}
+
+// ControllerOption modifies options of the controller runtime builder.
+type ControllerOption func(c *controllerConfig)
+
+// WithForPredicates allows to override the default set of predicates passed to the For method of the controller runtime builder.
+func WithForPredicates(predicates builder.Predicates) ControllerOption {
+	return func(c *controllerConfig) {
+		c.forPredicates = predicates
+	}
+}
+
+func defaultControllerConfig() *controllerConfig {
+	return &controllerConfig{
+		forPredicates: builder.WithPredicates(
+			predicate.And(
+				predicate.Or(
+					predicate.GenerationChangedPredicate{},
+					controllerutil2.DeletionTimestampChangedPredicate{},
+					predicate.LabelChangedPredicate{},
+					predicate.AnnotationChangedPredicate{},
+				),
+				predicate.Not(
+					controllerutil2.HasAnnotationPredicate(apiconst.OperationAnnotation, apiconst.OperationAnnotationValueIgnore),
+				),
+			),
+		),
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
-func (r *APIReconciler[T, C]) SetupWithManager(mgr ctrl.Manager, providerName string) error {
+func (r *APIReconciler[T, C]) SetupWithManager(mgr ctrl.Manager, providerName string, opts ...ControllerOption) error {
 	if providerName == "" {
 		return errors.New("provider name is required for manager setup")
 	}
+	cfg := defaultControllerConfig()
+	for _, o := range opts {
+		o(cfg)
+	}
 	r.providerName = providerName
 	controller := ctrl.NewControllerManagedBy(mgr).
-		For(r.emptyObj()).
+		For(r.emptyObj(), cfg.forPredicates).
 		// add provider config watch
 		WatchesRawSource(source.Kind(
 			r.platformCluster.Cluster().GetCache(),
